@@ -10,6 +10,12 @@ public class winmm
 
     [DllImport("winmm.dll")]
     private static extern uint timeKillEvent(uint id);
+    
+    [DllImport("winmm.dll")]
+    public static extern int timeBeginPeriod(uint uMilliseconds);
+    
+    [DllImport("winmm.dll")]
+    public static extern int timeEndPeriod(uint uMilliseconds);
 
     private const uint TIME_PERIODIC = 1; // 周期性触发
     private static uint _timerId;

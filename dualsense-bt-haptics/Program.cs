@@ -1,7 +1,6 @@
 ﻿// See https://aka.ms/new-console-template for more information
 
 using System.Buffers.Binary;
-using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -20,17 +19,21 @@ class Program
     private static ILogger logger;
     private static Device hid;
     private static MMDevice audio;
-    private static ConcurrentQueue<byte> audioQueue;
-    private static WasapiLoopbackCapture capture;
+    private static BufferedWaveProvider bufferedWaveProvider;
+    private static WasapiCapture capture;
     private static PVIGEM_CLIENT vigem_client;
     private static PVIGEM_TARGET vigem_ds;
     private static byte packetCounter = 0;
+    private static byte reportSeqCounter = 0;
     private static int SAMPLE_SIZE = 64;
     private static int SAMPLE_RATE = 3000;
     // var intervalNs = 1000000000L*SAMPLE_SIZE/(SAMPLE_RATE*2);
     private static int intervalMs = 1000 * SAMPLE_SIZE / (SAMPLE_RATE * 2);
-    private static Stopwatch stopWatch;
+    private static float GAIN = 2.0f;
+    private static Stopwatch latency;
+    private static Stopwatch lastAddSampleTime;
     private static readonly object _hidLock = new object();
+    private static byte[] stateData = new byte[47];
     
     private static void InitLogger()
     {
@@ -59,12 +62,12 @@ class Program
 
     private static void InitAudioCapture()
     {
-        audioQueue = new ConcurrentQueue<byte>();
         var enumerator = new MMDeviceEnumerator();
         foreach (var wasapi in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
         {
             logger.ZLogInformation($"Found device: {wasapi.FriendlyName}");
 
+            // DualSense Wireless Controller
             if (wasapi.FriendlyName.Contains("DualSense Wireless Controller"))
             {
                 audio = wasapi;
@@ -76,21 +79,32 @@ class Program
 
         logger.ZLogInformation($"Capture device: {audio.FriendlyName}");
 
+        // capture = new WasapiCapture(audio,true,0);
         capture = new WasapiLoopbackCapture(audio);
-        capture.WaveFormat = new WaveFormat(3000, 8, 2);
+        capture.WaveFormat = new WaveFormat(SAMPLE_RATE, 8, 2);
+        WasapiOut playbackDevice = null;
         
         capture.DataAvailable += (s, a) =>
         {
-            // logger.ZLogDebug($"Received {a.BytesRecorded}");
-            /*if(audioQueue.Count > 6400)
+            logger.ZLogDebug($"Received {a.BytesRecorded}");
+            bufferedWaveProvider.AddSamples(a.Buffer, 0, a.BytesRecorded);
+            if (a.BytesRecorded > 0)
             {
-                audioQueue.Clear();
-            }*/
-            for (int i = 0; i < a.BytesRecorded; i++)
-            {
-                audioQueue.Enqueue((byte)(a.Buffer[i] + 128)); // +128: s8 to u8
+                lastAddSampleTime.Restart();
             }
         };
+        
+        bufferedWaveProvider = new BufferedWaveProvider(capture.WaveFormat)
+        {
+            BufferDuration = TimeSpan.FromSeconds(5), // 缓冲最多5秒
+            DiscardOnBufferOverflow = true          // 防止内存爆炸
+        };
+
+        // 初始化播放设备 用于同时播放来测试延迟
+        /*playbackDevice = new WasapiOut(AudioClientShareMode.Shared, 10); // 10 latency ms
+        playbackDevice.Init(bufferedWaveProvider);
+        playbackDevice.Play();*/
+        
         capture.RecordingStopped += (s, a) =>
         {
             hid.Dispose();
@@ -136,43 +150,83 @@ class Program
     
     static void WinmmCallback(uint id, uint msg, IntPtr user, IntPtr dw1, IntPtr dw2)
     {
-        if (stopWatch.ElapsedMilliseconds > intervalMs + 3)
+        if (latency.ElapsedMilliseconds > intervalMs + 3)
         {
-            logger.ZLogWarning($"Warning: lag detected. {stopWatch.ElapsedMilliseconds} ms");
+            logger.ZLogWarning($"Warning: lag detected. {latency.ElapsedMilliseconds} ms");
         }
-    
-        stopWatch.Restart();
-        if (audioQueue.Count < 64)
+        /*if (bufferedWaveProvider.BufferedBytes > 600)
         {
-            // logger.ZLogTrace($"audioQueue is empty");
+            byte[] skipBuffer = new byte[bufferedWaveProvider.BufferedBytes - 128]; 
+            bufferedWaveProvider.Read(skipBuffer, 0, skipBuffer.Length);
+            logger.ZLogWarning($"Sync: Dropping old samples to catch up");
+        }*/
+    
+        latency.Restart();
+        if (bufferedWaveProvider.BufferedBytes < 64 && lastAddSampleTime.ElapsedMilliseconds <= 100)
+        {
             return;
         }
     
-        byte[] data = new byte[142];
-        data[0] = 0x32;
-        data[1] = 0;
+        byte[] data = new byte[206]; // 0x33:206 0x32:142
+        // 似乎与ReportId无关，主要靠的是packetId，尝试把0x32换成0x35同样可以工作
+        data[0] = 0x33; // 感觉 0x32 和 0x33 差不多，不知道为什么它要用33
+        data[1] = (byte)(reportSeqCounter << 4);
+        reportSeqCounter = (byte)((reportSeqCounter + 1) & 0x0F);
         // Packet 0x11
         data[2] = 0x11 | 0 << 6 | 1 << 7; // pid(0x11) unk(false) sized(true)
         data[3] = 7;
         data[4] = 0b11111110;
-        data[5] = 0;
+        /*data[5] = 0;
         data[6] = 0;
         data[7] = 0;
         data[8] = 0;
-        data[9] = 0xFF;
+        data[9] = 0xFF;*/
+        // 来自DSX的神秘参数？
+        data[5] = 0x40;
+        data[6] = 0x40;
+        data[7] = 0x40;
+        data[8] = 0x40;
+        data[9] = 0x40;
         data[10] = packetCounter++;
         // Packet 0x12
         data[11] = 0x12 | 0 << 6 | 1 << 7;
         data[12] = (byte)SAMPLE_SIZE;
+        bufferedWaveProvider.Read(data, 13, SAMPLE_SIZE);
         for (int i = 13; i < SAMPLE_SIZE + 13; i++)
         {
-            audioQueue.TryDequeue(out data[i]);
-            // 静默时有底噪
+            data[i] = (byte)((data[i] - 128) * GAIN);
         }
+        // 来自 DSX，应该就是普通的SetStateData
+        var packet_0x10 = new byte[]
+        {
+            0x90, // Packet: 0x10
+            0x3f, // 63
+            // Length: 47 ⬇️
+            // SetStateData 
+            0xfd, 0xf7, 0x0, 0x0, 0x7f, 0x7f,
+            0xff, 0x9, 0x0, 0xf, 0x0, 0x0, 0x0, 0x0,
+            0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+            0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+            0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xa,
+            0x7, 0x0, 0x0, 0x2, 0x1, 
+            0x00,
+            0x00,0x9b,0x00 // RGB LED: R, G, B
+        };
+        // Array.Copy(packet_0x10, 0, data, 77, packet_0x10.Length);
+        data[77] = 0x90;
+        data[78] = 0x3f;
+        Array.Copy(stateData, 0, data, 79, stateData.Length);
+        
     
         var crc = Utils.crc32(data, data.Length - 4);
         BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(data.Length - 4, 4), crc);
         lock(_hidLock) { hid.Write(data); }
+        
+        if (bufferedWaveProvider.BufferedBytes >= 64)
+        {
+            // 立即发送数据，减少数据积压
+            WinmmCallback(id, msg, user, dw1, dw2);
+        }
     }
 
     static Task InputForwardTask()
@@ -209,7 +263,7 @@ class Program
                         }
                     }
                 }
-                Thread.Sleep(4);
+                Thread.Sleep(5);
             }
         });
     }
@@ -235,7 +289,8 @@ class Program
                         outputSeq = 0;
                     }
                     outputData[2] = 0x10;
-                    Buffer.BlockCopy(outputBuffer.Buffer, 1, outputData, 3, 63);
+                    Buffer.BlockCopy(outputBuffer.Buffer, 1, outputData, 3, 47);
+                    Buffer.BlockCopy(outputBuffer.Buffer, 1, stateData, 0, 47);
                     var crc = Utils.crc32(outputData, outputData.Length - 4);
                     BinaryPrimitives.WriteUInt32LittleEndian(outputData.AsSpan(outputData.Length - 4, 4), crc);
                     lock(_hidLock) { hid.Write(outputData); }
@@ -252,11 +307,14 @@ class Program
         InitHid(0x054C, 0x0CE6);
         InitViGEm();
         InitAudioCapture();
-        stopWatch = new Stopwatch();
+        latency = new Stopwatch();
+        lastAddSampleTime = new Stopwatch();
         
         logger.ZLogInformation($"Hello World");
+        // winmm.timeBeginPeriod(1);
         capture.StartRecording();
-        stopWatch.Start();
+        latency.Start();
+        lastAddSampleTime.Start();
         winmm.Start((uint)intervalMs, WinmmCallback);
 
         Task inputTask = InputForwardTask();
