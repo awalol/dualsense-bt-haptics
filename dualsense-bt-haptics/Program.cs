@@ -1,6 +1,7 @@
 ﻿// See https://aka.ms/new-console-template for more information
 
 using System.Buffers.Binary;
+using System.CommandLine;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -20,6 +21,7 @@ class Program
     private static Device hid;
     private static MMDevice audio;
     private static BufferedWaveProvider bufferedWaveProvider;
+    private static BufferedWaveProvider bufferedWaveProvider2;
     private static WasapiCapture capture;
     private static PVIGEM_CLIENT vigem_client;
     private static PVIGEM_TARGET vigem_ds;
@@ -31,21 +33,27 @@ class Program
     private static int intervalMs = 1000 * SAMPLE_SIZE / (SAMPLE_RATE * 2);
     private static float GAIN = 2.0f;
     private static Stopwatch latency;
-    private static Stopwatch lastAddSampleTime;
     private static readonly object _hidLock = new object();
     private static byte[] stateData = new byte[47];
     
-    private static void InitLogger()
+    // Command Args
+    private static bool report33 = false;
+    
+    private static void InitLogger(bool verbose = false)
     {
         var factory = LoggerFactory.Create(logging =>
         {
-            logging.SetMinimumLevel(LogLevel.Information);
+            logging.SetMinimumLevel(verbose ? LogLevel.Trace : LogLevel.Information);
 
             logging.AddZLoggerConsole();
             logging.AddZLoggerFile("log.txt");
         });
         
         logger = factory.CreateLogger("Program");
+        if (verbose)
+        {
+            logger.ZLogInformation($"Enable Verbose");
+        }
     }
 
     private static void InitHid(ushort vendorId,ushort  productId)
@@ -82,16 +90,11 @@ class Program
         // capture = new WasapiCapture(audio,true,0);
         capture = new WasapiLoopbackCapture(audio);
         capture.WaveFormat = new WaveFormat(SAMPLE_RATE, 8, 2);
-        WasapiOut playbackDevice = null;
         
         capture.DataAvailable += (s, a) =>
         {
             logger.ZLogDebug($"Received {a.BytesRecorded}");
             bufferedWaveProvider.AddSamples(a.Buffer, 0, a.BytesRecorded);
-            if (a.BytesRecorded > 0)
-            {
-                lastAddSampleTime.Restart();
-            }
         };
         
         bufferedWaveProvider = new BufferedWaveProvider(capture.WaveFormat)
@@ -99,11 +102,18 @@ class Program
             BufferDuration = TimeSpan.FromSeconds(5), // 缓冲最多5秒
             DiscardOnBufferOverflow = true          // 防止内存爆炸
         };
+        
+        bufferedWaveProvider2 = new BufferedWaveProvider(capture.WaveFormat)
+        {
+            BufferDuration = TimeSpan.FromSeconds(5), // 缓冲最多5秒
+            DiscardOnBufferOverflow = true          // 防止内存爆炸
+        };
 
         // 初始化播放设备 用于同时播放来测试延迟
-        /*playbackDevice = new WasapiOut(AudioClientShareMode.Shared, 10); // 10 latency ms
-        playbackDevice.Init(bufferedWaveProvider);
-        playbackDevice.Play();*/
+        // WasapiOut playbackDevice = null;
+        // playbackDevice = new WasapiOut(AudioClientShareMode.Shared, 10); // 10 latency ms
+        // playbackDevice.Init(bufferedWaveProvider2);
+        // playbackDevice.Play();
         
         capture.RecordingStopped += (s, a) =>
         {
@@ -162,31 +172,37 @@ class Program
         }*/
     
         latency.Restart();
-        if (bufferedWaveProvider.BufferedBytes < 64 && lastAddSampleTime.ElapsedMilliseconds <= 100)
+        if (bufferedWaveProvider.BufferedBytes < 64)
         {
             return;
         }
     
-        byte[] data = new byte[206]; // 0x33:206 0x32:142
+        byte[] data = new byte[report33 ? 206 : 142]; // 0x33:206 0x32:142
         // 似乎与ReportId无关，主要靠的是packetId，尝试把0x32换成0x35同样可以工作
-        data[0] = 0x33; // 感觉 0x32 和 0x33 差不多，不知道为什么它要用33
+        data[0] = (byte)(report33 ? 0x33 : 0x32); // 感觉 0x32 和 0x33 差不多，不知道为什么它要用33
         data[1] = (byte)(reportSeqCounter << 4);
         reportSeqCounter = (byte)((reportSeqCounter + 1) & 0x0F);
         // Packet 0x11
         data[2] = 0x11 | 0 << 6 | 1 << 7; // pid(0x11) unk(false) sized(true)
         data[3] = 7;
         data[4] = 0b11111110;
-        /*data[5] = 0;
-        data[6] = 0;
-        data[7] = 0;
-        data[8] = 0;
-        data[9] = 0xFF;*/
-        // 来自DSX的神秘参数？
-        data[5] = 0x40;
-        data[6] = 0x40;
-        data[7] = 0x40;
-        data[8] = 0x40;
-        data[9] = 0x40;
+        if (!report33)
+        {
+            data[5] = 0;
+            data[6] = 0;
+            data[7] = 0;
+            data[8] = 0;
+            data[9] = 0xFF;
+        }
+        else
+        {
+            // 来自DSX的神秘参数？
+            data[5] = 0x40;
+            data[6] = 0x40;
+            data[7] = 0x40;
+            data[8] = 0x40;
+            data[9] = 0x40;
+        }
         data[10] = packetCounter++;
         // Packet 0x12
         data[11] = 0x12 | 0 << 6 | 1 << 7;
@@ -194,6 +210,7 @@ class Program
         bufferedWaveProvider.Read(data, 13, SAMPLE_SIZE);
         for (int i = 13; i < SAMPLE_SIZE + 13; i++)
         {
+            bufferedWaveProvider2.AddSamples([data[i]],0,1);
             data[i] = (byte)((data[i] - 128) * GAIN);
         }
         // 来自 DSX，应该就是普通的SetStateData
@@ -213,9 +230,9 @@ class Program
             0x00,0x9b,0x00 // RGB LED: R, G, B
         };
         // Array.Copy(packet_0x10, 0, data, 77, packet_0x10.Length);
-        data[77] = 0x90;
+        /*data[77] = 0x90;
         data[78] = 0x3f;
-        Array.Copy(stateData, 0, data, 79, stateData.Length);
+        Array.Copy(stateData, 0, data, 79, stateData.Length);*/
         
     
         var crc = Utils.crc32(data, data.Length - 4);
@@ -263,7 +280,7 @@ class Program
                         }
                     }
                 }
-                Thread.Sleep(5);
+                await Task.Delay(5);
             }
         });
     }
@@ -283,7 +300,7 @@ class Program
 
                     byte[] outputData = new byte[78];
                     outputData[0] = 0x31;
-                    outputData[1] = (byte)(outputSeq << 4);
+                    outputData[1] = (byte)(outputSeq << 4 + 2);
                     if (++outputSeq == 256)
                     {
                         outputSeq = 0;
@@ -298,23 +315,25 @@ class Program
             }
         });
     }
-    
 
-    public static void Main(string[] args)
-    { 
-        InitLogger();
+    static void Run(bool verbose = false,bool report33 = false)
+    {
+        InitLogger(verbose);
+        if (report33)
+        {
+            logger.ZLogInformation($"ReportId 0x33");
+        }
+        logger.ZLogInformation($"Volume Gain: {GAIN}");
         // Connect To BT Dualsense
         InitHid(0x054C, 0x0CE6);
         InitViGEm();
         InitAudioCapture();
         latency = new Stopwatch();
-        lastAddSampleTime = new Stopwatch();
         
         logger.ZLogInformation($"Hello World");
-        // winmm.timeBeginPeriod(1);
+        winmm.timeBeginPeriod(1);
         capture.StartRecording();
         latency.Start();
-        lastAddSampleTime.Start();
         winmm.Start((uint)intervalMs, WinmmCallback);
 
         Task inputTask = InputForwardTask();
@@ -324,6 +343,39 @@ class Program
         {
             Thread.Sleep(500);
         }
+    }
+
+    public static int Main(string[] args)
+    {
+        var rootCommand = new RootCommand("A tool that forwards PS5 DualSense haptics audio over Bluetooth.");
+
+        var logLevelOption = new Option<bool>("--verbose")
+        {
+            Description = "Default: false",
+            DefaultValueFactory = parseResult => false,
+        };
+        var reportId = new Option<bool>("--33")
+        {
+            Description = "Using 0x33 ReportId",
+            DefaultValueFactory = parseResult => false,
+        };
+        var gain = new Option<float>("--gain")
+        {
+            Description = "Volume Gain. Default 2.0",
+            DefaultValueFactory = parseResult => 2.0f
+        };
+        rootCommand.Options.Add(logLevelOption);
+        rootCommand.Options.Add(reportId);
+        rootCommand.Options.Add(gain);
+        rootCommand.SetAction(parseResult =>
+        {
+            GAIN = parseResult.GetValue(gain);
+            Run(
+                verbose: parseResult.GetValue(logLevelOption),
+                report33: parseResult.GetValue(reportId)
+                );
+        });
+        return rootCommand.Parse(args).Invoke();
     }
 }
 

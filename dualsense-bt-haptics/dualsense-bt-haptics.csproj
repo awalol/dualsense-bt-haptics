@@ -12,6 +12,7 @@
       <PackageReference Include="HidApi.Net" Version="1.2.0" />
       <PackageReference Include="HidSharp" Version="2.6.4" />
       <PackageReference Include="NAudio" Version="2.2.1" />
+      <PackageReference Include="System.CommandLine" Version="2.0.3" />
       <PackageReference Include="ZLogger" Version="2.5.10" />
     </ItemGroup>
 
