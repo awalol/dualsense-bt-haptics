@@ -21,7 +21,6 @@ class Program
     private static Device hid;
     private static MMDevice audio;
     private static BufferedWaveProvider bufferedWaveProvider;
-    private static BufferedWaveProvider bufferedWaveProvider2;
     private static WasapiCapture capture;
     private static PVIGEM_CLIENT vigem_client;
     private static PVIGEM_TARGET vigem_ds;
@@ -70,7 +69,7 @@ class Program
 
     private static void InitAudioCapture()
     {
-        var enumerator = new MMDeviceEnumerator();
+        /*var enumerator = new MMDeviceEnumerator();
         foreach (var wasapi in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
         {
             logger.ZLogInformation($"Found device: {wasapi.FriendlyName}");
@@ -81,7 +80,8 @@ class Program
                 audio = wasapi;
                 break;
             }
-        }
+        }*/
+        audio = WasapiLoopbackCapture.GetDefaultLoopbackCaptureDevice();
 
         if (audio == null) throw new Exception("Audio Device not found");
 
@@ -89,21 +89,20 @@ class Program
 
         // capture = new WasapiCapture(audio,true,0);
         capture = new WasapiLoopbackCapture(audio);
+        Utils.SetAudioBufferMillisecondsLength(capture, 10);
         capture.WaveFormat = new WaveFormat(SAMPLE_RATE, 8, 2);
-        
+
+        var sw = new Stopwatch();
+        sw.Restart();
         capture.DataAvailable += (s, a) =>
         {
             logger.ZLogDebug($"Received {a.BytesRecorded}");
+            // Console.WriteLine($"{sw.ElapsedMilliseconds} {a.BytesRecorded}");
+            sw.Restart();
             bufferedWaveProvider.AddSamples(a.Buffer, 0, a.BytesRecorded);
         };
         
         bufferedWaveProvider = new BufferedWaveProvider(capture.WaveFormat)
-        {
-            BufferDuration = TimeSpan.FromSeconds(5), // 缓冲最多5秒
-            DiscardOnBufferOverflow = true          // 防止内存爆炸
-        };
-        
-        bufferedWaveProvider2 = new BufferedWaveProvider(capture.WaveFormat)
         {
             BufferDuration = TimeSpan.FromSeconds(5), // 缓冲最多5秒
             DiscardOnBufferOverflow = true          // 防止内存爆炸
@@ -158,11 +157,16 @@ class Program
         }
     }
     
-    static void WinmmCallback(uint id, uint msg, IntPtr user, IntPtr dw1, IntPtr dw2)
+    static void WinmmCallback()
     {
         if (latency.ElapsedMilliseconds > intervalMs + 3)
         {
             logger.ZLogWarning($"Warning: lag detected. {latency.ElapsedMilliseconds} ms");
+        }
+
+        if (latency.ElapsedTicks <= 10.666 * TimeSpan.TicksPerMillisecond)
+        {
+            return;
         }
         /*if (bufferedWaveProvider.BufferedBytes > 600)
         {
@@ -210,7 +214,6 @@ class Program
         bufferedWaveProvider.Read(data, 13, SAMPLE_SIZE);
         for (int i = 13; i < SAMPLE_SIZE + 13; i++)
         {
-            bufferedWaveProvider2.AddSamples([data[i]],0,1);
             data[i] = (byte)((data[i] - 128) * GAIN);
         }
         // 来自 DSX，应该就是普通的SetStateData
@@ -239,11 +242,11 @@ class Program
         BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(data.Length - 4, 4), crc);
         lock(_hidLock) { hid.Write(data); }
         
-        if (bufferedWaveProvider.BufferedBytes >= 64)
+        /*if (bufferedWaveProvider.BufferedBytes >= 64)
         {
             // 立即发送数据，减少数据积压
             WinmmCallback(id, msg, user, dw1, dw2);
-        }
+        }*/
     }
 
     static Task InputForwardTask()
@@ -326,7 +329,7 @@ class Program
         logger.ZLogInformation($"Volume Gain: {GAIN}");
         // Connect To BT Dualsense
         InitHid(0x054C, 0x0CE6);
-        InitViGEm();
+        // InitViGEm();
         InitAudioCapture();
         latency = new Stopwatch();
         
@@ -334,14 +337,15 @@ class Program
         winmm.timeBeginPeriod(1);
         capture.StartRecording();
         latency.Start();
-        winmm.Start((uint)intervalMs, WinmmCallback);
+        // winmm.Start((uint)intervalMs, WinmmCallback);
 
         Task inputTask = InputForwardTask();
         Task outputTask = OutputForwardTask();
 
         while (capture.CaptureState != CaptureState.Stopped)
         {
-            Thread.Sleep(500);
+            // Thread.Sleep(500);
+            WinmmCallback();
         }
     }
 

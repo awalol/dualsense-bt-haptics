@@ -1,4 +1,6 @@
-﻿namespace dualsense_bt_haptics;
+﻿using System.Reflection;
+
+namespace dualsense_bt_haptics;
 
 public class Utils
 {
@@ -16,5 +18,47 @@ public class Utils
         }
 
         return ~crc;
+    }
+
+    public static bool SetAudioBufferMillisecondsLength(object captureInstance, int value)
+    {
+        var type = captureInstance.GetType();
+
+        FieldInfo? field = null;
+        while (type != null && field == null)
+        {
+            field = type.GetField("audioBufferMillisecondsLength", BindingFlags.NonPublic | BindingFlags.Instance);
+            type = type.BaseType;
+        }
+
+        if (field == null)
+        {
+            return false;
+        }
+
+        field.SetValue(captureInstance, value);
+
+        return true;
+    }
+
+    public static bool SetUseEventSync(object captureInstance, bool value)
+    {
+        var type = captureInstance.GetType();
+
+        FieldInfo? field = null;
+        while (type != null && field == null)
+        {
+            field = type.GetField("isUsingEventSync", BindingFlags.NonPublic | BindingFlags.Instance);
+            type = type.BaseType;
+        }
+
+        if (field == null)
+        {
+            return false;
+        }
+
+        field.SetValue(captureInstance, value);
+
+        return false;
     }
 }
