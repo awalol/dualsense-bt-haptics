@@ -21,7 +21,6 @@ class Program
     private static Device hid;
     private static MMDevice audio;
     private static BufferedWaveProvider bufferedWaveProvider;
-    private static BufferedWaveProvider bufferedWaveProvider2;
     private static WasapiCapture capture;
     private static PVIGEM_CLIENT vigem_client;
     private static PVIGEM_TARGET vigem_ds;
@@ -88,7 +87,8 @@ class Program
         logger.ZLogInformation($"Capture device: {audio.FriendlyName}");
 
         // capture = new WasapiCapture(audio,true,0);
-        capture = new WasapiLoopbackCapture(audio);
+        capture = new WasapiLoopbackCapture(WasapiLoopbackCapture.GetDefaultLoopbackCaptureDevice());
+        Utils.SetAudioBufferMillisecondsLength(capture, 10);
         capture.WaveFormat = new WaveFormat(SAMPLE_RATE, 8, 2);
         
         capture.DataAvailable += (s, a) =>
@@ -102,18 +102,6 @@ class Program
             BufferDuration = TimeSpan.FromSeconds(5), // 缓冲最多5秒
             DiscardOnBufferOverflow = true          // 防止内存爆炸
         };
-        
-        bufferedWaveProvider2 = new BufferedWaveProvider(capture.WaveFormat)
-        {
-            BufferDuration = TimeSpan.FromSeconds(5), // 缓冲最多5秒
-            DiscardOnBufferOverflow = true          // 防止内存爆炸
-        };
-
-        // 初始化播放设备 用于同时播放来测试延迟
-        // WasapiOut playbackDevice = null;
-        // playbackDevice = new WasapiOut(AudioClientShareMode.Shared, 10); // 10 latency ms
-        // playbackDevice.Init(bufferedWaveProvider2);
-        // playbackDevice.Play();
         
         capture.RecordingStopped += (s, a) =>
         {
@@ -164,13 +152,7 @@ class Program
         {
             logger.ZLogWarning($"Warning: lag detected. {latency.ElapsedMilliseconds} ms");
         }
-        /*if (bufferedWaveProvider.BufferedBytes > 600)
-        {
-            byte[] skipBuffer = new byte[bufferedWaveProvider.BufferedBytes - 128]; 
-            bufferedWaveProvider.Read(skipBuffer, 0, skipBuffer.Length);
-            logger.ZLogWarning($"Sync: Dropping old samples to catch up");
-        }*/
-    
+        
         latency.Restart();
         if (bufferedWaveProvider.BufferedBytes < 64)
         {
@@ -210,7 +192,6 @@ class Program
         bufferedWaveProvider.Read(data, 13, SAMPLE_SIZE);
         for (int i = 13; i < SAMPLE_SIZE + 13; i++)
         {
-            bufferedWaveProvider2.AddSamples([data[i]],0,1);
             data[i] = (byte)((data[i] - 128) * GAIN);
         }
         // 来自 DSX，应该就是普通的SetStateData
@@ -316,17 +297,16 @@ class Program
         });
     }
 
-    static void Run(bool verbose = false,bool report33 = false)
+    static void Run(bool verbose = false,bool report33 = false,bool disableViGEm = false)
     {
         InitLogger(verbose);
-        if (report33)
-        {
-            logger.ZLogInformation($"ReportId 0x33");
-        }
-        logger.ZLogInformation($"Volume Gain: {GAIN}");
+        logger.ZLogInformation($"Volume Gain: {GAIN} report33: {report33} disableViGEm: {disableViGEm}");
         // Connect To BT Dualsense
         InitHid(0x054C, 0x0CE6);
-        InitViGEm();
+        if (!disableViGEm)
+        { 
+            InitViGEm();
+        }
         InitAudioCapture();
         latency = new Stopwatch();
         
@@ -361,18 +341,25 @@ class Program
         };
         var gain = new Option<float>("--gain")
         {
-            Description = "Volume Gain. Default 2.0",
+            Description = "Volume Gain",
             DefaultValueFactory = parseResult => 2.0f
+        };
+        var disableViGEm = new Option<bool>("--disable-vigem")
+        {
+            Description = "Disable ViGEm (No Virtual Controller Created)",
+            DefaultValueFactory = parseResult => false
         };
         rootCommand.Options.Add(logLevelOption);
         rootCommand.Options.Add(reportId);
         rootCommand.Options.Add(gain);
+        rootCommand.Options.Add(disableViGEm);
         rootCommand.SetAction(parseResult =>
         {
             GAIN = parseResult.GetValue(gain);
             Run(
                 verbose: parseResult.GetValue(logLevelOption),
-                report33: parseResult.GetValue(reportId)
+                report33: parseResult.GetValue(reportId),
+                disableViGEm: parseResult.GetValue(disableViGEm)
                 );
         });
         return rootCommand.Parse(args).Invoke();
