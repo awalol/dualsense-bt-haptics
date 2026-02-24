@@ -306,8 +306,6 @@ class Program
         if (!disableViGEm)
         { 
             InitViGEm();
-            Task inputTask = InputForwardTask();
-            Task outputTask = OutputForwardTask();
         }
         InitAudioCapture();
         latency = new Stopwatch();
@@ -317,6 +315,12 @@ class Program
         capture.StartRecording();
         latency.Start();
         winmm.Start((uint)intervalMs, WinmmCallback);
+
+        if (!disableViGEm)
+        {
+            Task inputTask = InputForwardTask();
+            Task outputTask = OutputForwardTask();
+        }
 
         while (capture.CaptureState != CaptureState.Stopped)
         {
