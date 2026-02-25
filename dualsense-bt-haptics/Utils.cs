@@ -40,4 +40,25 @@ public class Utils
 
         return true;
     }
+    
+    public static bool SetUseEventSync(object captureInstance, bool value)
+    {
+        var type = captureInstance.GetType();
+
+        FieldInfo? field = null;
+        while (type != null && field == null)
+        {
+            field = type.GetField("isUsingEventSync", BindingFlags.NonPublic | BindingFlags.Instance);
+            type = type.BaseType;
+        }
+
+        if (field == null)
+        {
+            return false;
+        }
+
+        field.SetValue(captureInstance, value);
+
+        return false;
+    }
 }

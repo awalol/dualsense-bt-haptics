@@ -67,7 +67,7 @@ class Program
         logger.ZLogInformation($"Serial Number: {serial}");
     }
 
-    private static void InitAudioCapture()
+    private static void InitAudioCapture(int bufferDuration)
     {
         var enumerator = new MMDeviceEnumerator();
         foreach (var wasapi in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
@@ -88,18 +88,19 @@ class Program
 
         // capture = new WasapiCapture(audio,true,0);
         capture = new WasapiLoopbackCapture(audio);
-        // Utils.SetAudioBufferMillisecondsLength(capture, 10);
+        Utils.SetAudioBufferMillisecondsLength(capture, 10);
+        Utils.SetUseEventSync(capture, true);
         capture.WaveFormat = new WaveFormat(SAMPLE_RATE, 8, 2);
         
         capture.DataAvailable += (s, a) =>
         {
-            logger.ZLogDebug($"Received {a.BytesRecorded}");
+            // logger.ZLogDebug($"Received {a.BytesRecorded}");
             bufferedWaveProvider.AddSamples(a.Buffer, 0, a.BytesRecorded);
         };
         
         bufferedWaveProvider = new BufferedWaveProvider(capture.WaveFormat)
         {
-            BufferDuration = TimeSpan.FromSeconds(5), // 缓冲最多5秒
+            BufferDuration = TimeSpan.FromMilliseconds(bufferDuration), // 缓冲
             DiscardOnBufferOverflow = true          // 防止内存爆炸
         };
         
@@ -297,17 +298,17 @@ class Program
         });
     }
 
-    static void Run(bool verbose = false,bool report33 = false,bool disableViGEm = false)
+    static void Run(bool verbose,bool report33,bool disableViGEm,int bufferDuration)
     {
         InitLogger(verbose);
-        logger.ZLogInformation($"Volume Gain: {GAIN} report33: {report33} disableViGEm: {disableViGEm}");
+        logger.ZLogInformation($"Volume Gain: {GAIN} report33: {report33} disableViGEm: {disableViGEm} bufferDuration: {bufferDuration}");
         // Connect To BT Dualsense
         InitHid(0x054C, 0x0CE6);
         if (!disableViGEm)
         { 
             InitViGEm();
         }
-        InitAudioCapture();
+        InitAudioCapture(bufferDuration);
         latency = new Stopwatch();
         
         logger.ZLogInformation($"Hello World");
@@ -352,17 +353,24 @@ class Program
             Description = "Disable ViGEm (No Virtual Controller Created)",
             DefaultValueFactory = parseResult => false
         };
+        var bufferDuration = new Option<int>("--buffer")
+        {
+            Description = "Buffer Duration (ms)",
+            DefaultValueFactory = parseResult => 32
+        };
         rootCommand.Options.Add(logLevelOption);
         rootCommand.Options.Add(reportId);
         rootCommand.Options.Add(gain);
         rootCommand.Options.Add(disableViGEm);
+        rootCommand.Options.Add(bufferDuration);
         rootCommand.SetAction(parseResult =>
         {
             GAIN = parseResult.GetValue(gain);
             Run(
                 verbose: parseResult.GetValue(logLevelOption),
                 report33: parseResult.GetValue(reportId),
-                disableViGEm: parseResult.GetValue(disableViGEm)
+                disableViGEm: parseResult.GetValue(disableViGEm),
+                bufferDuration: parseResult.GetValue(bufferDuration)
                 );
         });
         return rootCommand.Parse(args).Invoke();
