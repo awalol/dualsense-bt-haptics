@@ -87,8 +87,8 @@ class Program
         logger.ZLogInformation($"Capture device: {audio.FriendlyName}");
 
         // capture = new WasapiCapture(audio,true,0);
-        capture = new WasapiLoopbackCapture(WasapiLoopbackCapture.GetDefaultLoopbackCaptureDevice());
-        Utils.SetAudioBufferMillisecondsLength(capture, 10);
+        capture = new WasapiLoopbackCapture(audio);
+        // Utils.SetAudioBufferMillisecondsLength(capture, 10);
         capture.WaveFormat = new WaveFormat(SAMPLE_RATE, 8, 2);
         
         capture.DataAvailable += (s, a) =>
