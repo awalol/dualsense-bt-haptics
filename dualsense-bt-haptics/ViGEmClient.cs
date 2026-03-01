@@ -40,7 +40,7 @@ public sealed partial class ViGEmClient
         PVIGEM_TARGET target,
         DS5_REPORT report);
     
-    internal enum VIGEM_ERROR : UInt32
+    public enum VIGEM_ERROR : UInt32
     {
         VIGEM_ERROR_NONE = 0x20000000,
         VIGEM_ERROR_BUS_NOT_FOUND = 0xE0000001,

@@ -1,4 +1,6 @@
-﻿using System.Reflection;
+﻿using System.ComponentModel;
+using System.Reflection;
+using System.Runtime.InteropServices;
 
 namespace dualsense_bt_haptics;
 
@@ -18,6 +20,29 @@ public class Utils
         }
 
         return ~crc;
+    }
+
+    public static void ViGEmError(ViGEmClient.VIGEM_ERROR error)
+    {
+        switch (error)
+        {
+            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_NONE:
+                break;
+            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_BUS_NOT_FOUND:
+                throw new Exception("VIGEM_BUS_NOT_FOUND");
+            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_TARGET_UNINITIALIZED:
+                throw new Exception("VIGEM_TARGET_UNINITIALIZED");
+            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_ALREADY_CONNECTED:
+                throw new Exception("VIGEM_ALREADY_CONNECTED");
+            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_NO_FREE_SLOT:
+                throw new Exception("VIGEM_NO_FREE_SLOT");
+            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_BUS_ACCESS_FAILED:
+                throw new Exception("VIGEM_BUS_ACCESS_FAILED");
+            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_BUS_VERSION_MISMATCH:
+                throw new Exception("VIGEM_BUS_VERSION_MISMATCH");
+            default:
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
     }
     
     public static bool SetAudioBufferMillisecondsLength(object captureInstance, int value)
