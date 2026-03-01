@@ -1,14 +1,14 @@
 ﻿// See https://aka.ms/new-console-template for more information
 
 using System.Buffers.Binary;
-using System.ComponentModel;
+using System.CommandLine;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using dualsense_bt_haptics;
 using HidApi;
 using Microsoft.Extensions.Logging;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 using ZLogger;
 
 using PVIGEM_CLIENT = System.IntPtr;
@@ -26,26 +26,32 @@ class Program
     private static byte packetCounter = 0;
     private static byte reportSeqCounter = 0;
     private static int SAMPLE_SIZE = 64;
-    private static int SAMPLE_RATE = 3000;
-    // var intervalNs = 1000000000L*SAMPLE_SIZE/(SAMPLE_RATE*2);
+    private static int SAMPLE_RATE = 3000; 
+    private static long intervalNs = 1000000000L*SAMPLE_SIZE/(SAMPLE_RATE*2);
     private static int intervalMs = 1000 * SAMPLE_SIZE / (SAMPLE_RATE * 2);
     private static float GAIN = 2.0f;
     private static Stopwatch latency;
-    private static Stopwatch lastAddSampleTime;
     private static readonly object _hidLock = new object();
     private static byte[] stateData = new byte[47];
     
-    private static void InitLogger()
+    // Command Args
+    private static bool report33 = false;
+    
+    private static void InitLogger(bool verbose = false)
     {
         var factory = LoggerFactory.Create(logging =>
         {
-            logging.SetMinimumLevel(LogLevel.Information);
+            logging.SetMinimumLevel(verbose ? LogLevel.Trace : LogLevel.Information);
 
             logging.AddZLoggerConsole();
             logging.AddZLoggerFile("log.txt");
         });
         
         logger = factory.CreateLogger("Program");
+        if (verbose)
+        {
+            logger.ZLogInformation($"Enable Verbose");
+        }
     }
 
     private static void InitHid(ushort vendorId,ushort  productId)
@@ -58,9 +64,36 @@ class Program
         logger.ZLogInformation($"Product: {product}");
         var serial = hid.GetSerialNumber();
         logger.ZLogInformation($"Serial Number: {serial}");
+
+        var report32 = new byte[142];
+        report32[0] = 0x32;
+        report32[1] = 0x10;
+        // 来自 DSX，应该就是普通的SetStateData
+        var packet_0x10 = new byte[]
+        {
+            0x90, // Packet: 0x10
+            0x3f, // 63
+            // Length: 47 ⬇️
+            // SetStateData 
+            0xfd, 0xf7, 0x0, 0x0, 0x7f, 0x7f,
+            0xff, 0x9, 0x0, 0xf, 0x0, 0x0, 0x0, 0x0,
+            0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+            0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+            0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xa,
+            0x7, 0x0, 0x0, 0x2, 0x1, 
+            0x00,
+            0xff,0xd7,0x00 // RGB LED: R, G, B
+        };
+        Array.Copy(packet_0x10, 0, report32, 2, packet_0x10.Length);
+        var crc = Utils.crc32(report32, report32.Length - 4);
+        BinaryPrimitives.WriteUInt32LittleEndian(report32.AsSpan(report32.Length - 4, 4), crc);
+        lock(_hidLock) { hid.Write(report32); }
     }
 
-    private static void InitAudioCapture()
+    static WdlResamplingSampleProvider resampler;
+    static IWaveProvider sample16;
+    
+    private static void InitAudioCapture(int bufferDuration)
     {
         var enumerator = new MMDeviceEnumerator();
         foreach (var wasapi in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
@@ -81,29 +114,25 @@ class Program
 
         // capture = new WasapiCapture(audio,true,0);
         capture = new WasapiLoopbackCapture(audio);
-        capture.WaveFormat = new WaveFormat(SAMPLE_RATE, 8, 2);
-        WasapiOut playbackDevice = null;
+        Utils.SetAudioBufferMillisecondsLength(capture, 10);
+        Utils.SetUseEventSync(capture, true);
+        logger.ZLogInformation($"{capture.WaveFormat.ToString()}");
         
         capture.DataAvailable += (s, a) =>
         {
-            logger.ZLogDebug($"Received {a.BytesRecorded}");
+            // logger.ZLogDebug($"Received {a.BytesRecorded}");
             bufferedWaveProvider.AddSamples(a.Buffer, 0, a.BytesRecorded);
-            if (a.BytesRecorded > 0)
-            {
-                lastAddSampleTime.Restart();
-            }
+            // WinmmCallback(0, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
         };
         
         bufferedWaveProvider = new BufferedWaveProvider(capture.WaveFormat)
         {
-            BufferDuration = TimeSpan.FromSeconds(5), // 缓冲最多5秒
+            BufferDuration = TimeSpan.FromMilliseconds(bufferDuration), // 缓冲
             DiscardOnBufferOverflow = true          // 防止内存爆炸
         };
-
-        // 初始化播放设备 用于同时播放来测试延迟
-        /*playbackDevice = new WasapiOut(AudioClientShareMode.Shared, 10); // 10 latency ms
-        playbackDevice.Init(bufferedWaveProvider);
-        playbackDevice.Play();*/
+        
+        resampler = new WdlResamplingSampleProvider(bufferedWaveProvider.ToSampleProvider(),3000);
+        sample16 = resampler.ToWaveProvider16();
         
         capture.RecordingStopped += (s, a) =>
         {
@@ -116,117 +145,77 @@ class Program
     {
         vigem_client = ViGEmClient.vigem_alloc();
         ViGEmClient.VIGEM_ERROR error = ViGEmClient.vigem_connect(vigem_client);
-        switch (error)
-        {
-            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_ALREADY_CONNECTED:
-                throw new Exception("VIGEM_ALREADY_CONNECTED");
-            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_BUS_NOT_FOUND:
-                throw new Exception("VIGEM_BUS_NOT_FOUND");
-            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_BUS_ACCESS_FAILED:
-                throw new Exception("VIGEM_BUS_ACCESS_FAILED");
-            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_BUS_VERSION_MISMATCH:
-                throw new Exception("VIGEM_BUS_VERSION_MISMATCH");
-        }
+        Utils.ViGEmError(error);
         
         vigem_ds = ViGEmClient.vigem_target_ds5_alloc();
-
         error = ViGEmClient.vigem_target_add(vigem_client,vigem_ds);
-        switch (error)
-        {
-            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_NONE:
-                break;
-            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_BUS_NOT_FOUND:
-                throw new Exception("VIGEM_BUS_NOT_FOUND");
-            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_TARGET_UNINITIALIZED:
-                throw new Exception("VIGEM_TARGET_UNINITIALIZED");
-            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_ALREADY_CONNECTED:
-                throw new Exception("VIGEM_ALREADY_CONNECTED");
-            case ViGEmClient.VIGEM_ERROR.VIGEM_ERROR_NO_FREE_SLOT:
-                throw new Exception("VIGEM_NO_FREE_SLOT");
-            default:
-                throw new Win32Exception(Marshal.GetLastWin32Error());
-        }
+        Utils.ViGEmError(error);
     }
     
     static void WinmmCallback(uint id, uint msg, IntPtr user, IntPtr dw1, IntPtr dw2)
     {
-        if (latency.ElapsedMilliseconds > intervalMs + 3)
+        if (latency.ElapsedTicks > (10.666 + 3) * TimeSpan.TicksPerMillisecond)
         {
             logger.ZLogWarning($"Warning: lag detected. {latency.ElapsedMilliseconds} ms");
+            // Thread.Sleep(TimeSpan.FromTicks((long)10.666 * TimeSpan.TicksPerMillisecond - latency.ElapsedTicks));
         }
-        /*if (bufferedWaveProvider.BufferedBytes > 600)
-        {
-            byte[] skipBuffer = new byte[bufferedWaveProvider.BufferedBytes - 128]; 
-            bufferedWaveProvider.Read(skipBuffer, 0, skipBuffer.Length);
-            logger.ZLogWarning($"Sync: Dropping old samples to catch up");
-        }*/
-    
         latency.Restart();
-        if (bufferedWaveProvider.BufferedBytes < 64 && lastAddSampleTime.ElapsedMilliseconds <= 100)
+        
+        byte[] buffer = new byte[512];
+        sample16.Read(buffer, 0, 512);
+        if (buffer.All(b => b != 0))
         {
             return;
         }
     
-        byte[] data = new byte[206]; // 0x33:206 0x32:142
+        byte[] data = new byte[report33 ? 206 : 142]; // 0x33:206 0x32:142
         // 似乎与ReportId无关，主要靠的是packetId，尝试把0x32换成0x35同样可以工作
-        data[0] = 0x33; // 感觉 0x32 和 0x33 差不多，不知道为什么它要用33
+        data[0] = (byte)(report33 ? 0x33 : 0x32); // 感觉 0x32 和 0x33 差不多，不知道为什么它要用33
         data[1] = (byte)(reportSeqCounter << 4);
         reportSeqCounter = (byte)((reportSeqCounter + 1) & 0x0F);
         // Packet 0x11
         data[2] = 0x11 | 0 << 6 | 1 << 7; // pid(0x11) unk(false) sized(true)
         data[3] = 7;
         data[4] = 0b11111110;
-        /*data[5] = 0;
-        data[6] = 0;
-        data[7] = 0;
-        data[8] = 0;
-        data[9] = 0xFF;*/
-        // 来自DSX的神秘参数？
-        data[5] = 0x40;
-        data[6] = 0x40;
-        data[7] = 0x40;
-        data[8] = 0x40;
-        data[9] = 0x40;
+        if (!report33)
+        {
+            data[5] = 0;
+            data[6] = 0;
+            data[7] = 0;
+            data[8] = 0;
+            data[9] = 0xFF;
+        }
+        else
+        {
+            // 来自DSX的神秘参数？
+            data[5] = 0x40;
+            data[6] = 0x40;
+            data[7] = 0x40;
+            data[8] = 0x40;
+            data[9] = 0x40;
+        }
         data[10] = packetCounter++;
         // Packet 0x12
         data[11] = 0x12 | 0 << 6 | 1 << 7;
         data[12] = (byte)SAMPLE_SIZE;
-        bufferedWaveProvider.Read(data, 13, SAMPLE_SIZE);
-        for (int i = 13; i < SAMPLE_SIZE + 13; i++)
+        for (int i = 13,offset = 0; i < SAMPLE_SIZE + 13; i += 2,offset += 8)
         {
-            data[i] = (byte)((data[i] - 128) * GAIN);
+            var ch3 = (short)((buffer[offset + 5] << 8) | (buffer[offset + 4] & 0xFF));
+            var ch4 = (short)((buffer[offset + 7] << 8) | (buffer[offset + 6] & 0xFF));
+            // BiQuadFilter.LowPassFilter(ch3, 1500, 0.7f);
+            // BiQuadFilter.LowPassFilter(ch4, 1500, 0.7f);
+            // Console.WriteLine($"{i - 13} {BitConverter.ToString(buffer)}");
+            data[i] = (byte)Math.Clamp(((ch3 >> 8)) * GAIN,-128,127);
+            data[i + 1] = (byte)Math.Clamp(((ch4 >> 8)) * GAIN,-128,127);
         }
-        // 来自 DSX，应该就是普通的SetStateData
-        var packet_0x10 = new byte[]
-        {
-            0x90, // Packet: 0x10
-            0x3f, // 63
-            // Length: 47 ⬇️
-            // SetStateData 
-            0xfd, 0xf7, 0x0, 0x0, 0x7f, 0x7f,
-            0xff, 0x9, 0x0, 0xf, 0x0, 0x0, 0x0, 0x0,
-            0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
-            0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
-            0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xa,
-            0x7, 0x0, 0x0, 0x2, 0x1, 
-            0x00,
-            0x00,0x9b,0x00 // RGB LED: R, G, B
-        };
-        // Array.Copy(packet_0x10, 0, data, 77, packet_0x10.Length);
-        data[77] = 0x90;
+        /*data[77] = 0x90;
         data[78] = 0x3f;
-        Array.Copy(stateData, 0, data, 79, stateData.Length);
+        Array.Copy(stateData, 0, data, 79, stateData.Length);*/
         
     
         var crc = Utils.crc32(data, data.Length - 4);
         BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(data.Length - 4, 4), crc);
         lock(_hidLock) { hid.Write(data); }
-        
-        if (bufferedWaveProvider.BufferedBytes >= 64)
-        {
-            // 立即发送数据，减少数据积压
-            WinmmCallback(id, msg, user, dw1, dw2);
-        }
     }
 
     static Task InputForwardTask()
@@ -263,7 +252,7 @@ class Program
                         }
                     }
                 }
-                Thread.Sleep(5);
+                await Task.Delay(5);
             }
         });
     }
@@ -283,7 +272,7 @@ class Program
 
                     byte[] outputData = new byte[78];
                     outputData[0] = 0x31;
-                    outputData[1] = (byte)(outputSeq << 4);
+                    outputData[1] = (byte)(outputSeq << 4 + 2);
                     if (++outputSeq == 256)
                     {
                         outputSeq = 0;
@@ -298,32 +287,109 @@ class Program
             }
         });
     }
-    
 
-    public static void Main(string[] args)
-    { 
-        InitLogger();
+    static void Run(bool verbose,bool report33,bool disableViGEm,int bufferDuration,bool useWinmm)
+    {
+        InitLogger(verbose);
+        logger.ZLogInformation($"Volume Gain: {GAIN} report33: {report33} disableViGEm: {disableViGEm} bufferDuration: {bufferDuration}");
         // Connect To BT Dualsense
         InitHid(0x054C, 0x0CE6);
-        InitViGEm();
-        InitAudioCapture();
+        if (!disableViGEm)
+        { 
+            InitViGEm();
+        }
+        InitAudioCapture(bufferDuration);
         latency = new Stopwatch();
-        lastAddSampleTime = new Stopwatch();
         
         logger.ZLogInformation($"Hello World");
-        // winmm.timeBeginPeriod(1);
+        winmm.timeBeginPeriod(1);
         capture.StartRecording();
         latency.Start();
-        lastAddSampleTime.Start();
-        winmm.Start((uint)intervalMs, WinmmCallback);
+        if (useWinmm)
+        { 
+            winmm.Start((uint)intervalMs + 1, WinmmCallback);
+        }
 
-        Task inputTask = InputForwardTask();
-        Task outputTask = OutputForwardTask();
+        if (!disableViGEm)
+        {
+            Task inputTask = InputForwardTask();
+            Task outputTask = OutputForwardTask();
+        }
 
+        var sw = new Stopwatch();
+        if (!useWinmm)
+        {
+            sw.Start();
+        }
         while (capture.CaptureState != CaptureState.Stopped)
         {
-            Thread.Sleep(500);
+            if (useWinmm)
+            {
+                Thread.Sleep(500);
+                continue;
+            }
+            
+            if (sw.ElapsedTicks <= intervalNs / TimeSpan.NanosecondsPerTick)
+            {
+                continue;
+            }
+            sw.Restart();
+            WinmmCallback(0, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
         }
+    }
+
+    public static int Main(string[] args)
+    {
+        var rootCommand = new RootCommand("A tool that forwards PS5 DualSense haptics audio over Bluetooth.");
+
+        var logLevelOption = new Option<bool>("--verbose")
+        {
+            Description = "Default: false",
+            DefaultValueFactory = parseResult => false,
+        };
+        var reportId = new Option<bool>("--33")
+        {
+            Description = "Using 0x33 ReportId",
+            DefaultValueFactory = parseResult => false,
+        };
+        var gain = new Option<float>("--gain")
+        {
+            Description = "Volume Gain",
+            DefaultValueFactory = parseResult => 2.0f
+        };
+        var disableViGEm = new Option<bool>("--disable-vigem")
+        {
+            Description = "Disable ViGEm (No Virtual Controller Created)",
+            DefaultValueFactory = parseResult => false
+        };
+        var bufferDuration = new Option<int>("--buffer")
+        {
+            Description = "Buffer Duration (ms)",
+            DefaultValueFactory = parseResult => 64
+        };
+        var winmm = new Option<bool>("--winmm")
+        {
+            Description = "使用 winmm 进行定时，资源占用低，但是声音会有点小卡顿",
+            DefaultValueFactory = parseResult => false
+        };
+        rootCommand.Options.Add(logLevelOption);
+        rootCommand.Options.Add(reportId);
+        rootCommand.Options.Add(gain);
+        rootCommand.Options.Add(disableViGEm);
+        rootCommand.Options.Add(bufferDuration);
+        rootCommand.Options.Add(winmm);
+        rootCommand.SetAction(parseResult =>
+        {
+            GAIN = parseResult.GetValue(gain);
+            Run(
+                verbose: parseResult.GetValue(logLevelOption),
+                report33: parseResult.GetValue(reportId),
+                disableViGEm: parseResult.GetValue(disableViGEm),
+                bufferDuration: parseResult.GetValue(bufferDuration),
+                useWinmm:parseResult.GetValue(winmm)
+                );
+        });
+        return rootCommand.Parse(args).Invoke();
     }
 }
 

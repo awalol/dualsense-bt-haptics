@@ -24,8 +24,8 @@
 4. 基于 [egormanga/SAxense](https://github.com/egormanga/SAxense) 逆向分析出的 **蓝牙 Haptics 控制报文**，向真实手柄推送音频流。
 
 ## 使用教程
-1. 创建个虚拟的音频设备，设置为 4 通道 48KHz 24bit （当然其他也可以，主要是为了减少杂音），我个人感觉使用 Steam Streaming 的虚拟设备效果最佳（这设备怎么装上去的不记得了）
-2. 把设备名称改成 `DualSense Wireless Controller`
+1. 创建个虚拟的音频设备，设置为 4 通道 48KHz 16bit
+2. 把设备名称改成 `DualSense Wireless Controller` (名称为 Wireless Controller 也可以工作)
 3. 启动 dualsense-bt-haptics.exe，之后正常进游戏即可
 4. 您可能需要搭配 hidhide 避免重复输入，当然你也可以尝试修改代码禁用虚拟手柄的创建，看看是否正常工作。因为我在原神测试的时候，蓝牙手柄被其他应用占用以后游戏内就无法正常工作了
 

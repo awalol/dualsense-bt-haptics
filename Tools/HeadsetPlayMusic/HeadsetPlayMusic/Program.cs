@@ -52,7 +52,7 @@ void report0x35(float[] sample)
     data[10] = packetCounter++;
     
     // Packet 0x16
-    data[11] = 0x16 | 0 << 6 | 1 << 7; // Speaker: 0x13 Headset: 0x16
+    data[11] = 0x13 | 0 << 6 | 1 << 7; // Speaker: 0x13 Headset: 0x16
     data[12] = (byte) SAMPLE_SIZE; // 200 bytes
     
     byte[] encodedAudio = new byte[SAMPLE_SIZE];
