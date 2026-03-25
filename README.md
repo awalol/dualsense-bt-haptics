@@ -1,4 +1,5 @@
 ﻿# dualsense-bt-haptics
+这个方案不通用，大多数3A游戏都不适用。可能只适用米哈游的游戏？
 
 > 🎮 让 DualSense（PS5 手柄）在 **蓝牙模式下启用音圈马达（Haptics）震动反馈** 的工具。
 
