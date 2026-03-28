@@ -1,13 +1,26 @@
 ﻿using System.Buffers.Binary;
 using System.Diagnostics;
 using HidApi;
+using LibUsbDotNet;
+using LibUsbDotNet.LibUsb;
+using LibUsbDotNet.Main;
 using NAudio.Wave;
 using OpusSharp.Core;
 using OpusSharp.Core.Extensions;
 
 byte packetCounter = 0;
 int reportSeqCounter = 0;
-var hid = new Device(0x054C, 0x0CE6);
+// var hid = new Device(0x054C, 0x0CE6);
+
+var finder = new UsbDeviceFinder(0x054c, 0x0ce6);
+var device = UsbDevice.OpenUsbDevice(finder);
+if (device == null)
+{
+    Console.WriteLine("UsbDevice not found");
+    return 1;
+}
+
+var writer = device.OpenEndpointWriter(WriteEndpointID.Ep05);
 
 var SAMPLE_RATE = 48000;
 var SAMPLE_SIZE = 200;
@@ -33,11 +46,13 @@ uint crc32(ReadOnlySpan<byte> data, int size)
     return ~crc;
 }
 
+var st = Stopwatch.StartNew();
+
 void report0x35(float[] sample)
 {
-    byte[] data = new byte[334];
-    data[0] = 0x35;
-    data[1] = (byte)(reportSeqCounter << 4);
+    byte[] data = new byte[204];
+    // data[0] = 0x34;
+    /*data[1] = (byte)(reportSeqCounter << 4);
     reportSeqCounter = (byte)((reportSeqCounter + 1) & 0x0F);
     
     // Packet 0x11
@@ -53,17 +68,19 @@ void report0x35(float[] sample)
     
     // Packet 0x16
     data[11] = 0x13 | 0 << 6 | 1 << 7; // Speaker: 0x13 Headset: 0x16
-    data[12] = (byte) SAMPLE_SIZE; // 200 bytes
+    data[12] = (byte) SAMPLE_SIZE; // 200 bytes*/
     
     byte[] encodedAudio = new byte[SAMPLE_SIZE];
     var encodedBytes = encoder.Encode(sample,
         SAMPLE_RATE / 100 * CHANNELS / 2, // 480 frames per 10ms (2ch: 2bytes per frame)
         encodedAudio, SAMPLE_SIZE);
-    Array.Copy(encodedAudio, 0, data, 13, encodedBytes);
+    Array.Copy(encodedAudio, 0, data, 0, encodedBytes);
 
     var crc = crc32(data, data.Length - 4);
     BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(data.Length - 4, 4), crc);
-    hid.Write(data);
+    int t;
+    var num = writer.Write(data, 10, out t);
+    // Console.WriteLine($"ErrorCode: {num} ,transfer: {t}");
 }
 
 var stopWatch = new Stopwatch();
@@ -86,4 +103,5 @@ while (audioFile.Position < audioFile.Length)
 
 encoder.Dispose();
 audioFile.Dispose();
-hid.Dispose();
+device.Close();
+return 0;
